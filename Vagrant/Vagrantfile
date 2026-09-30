@@ -1,0 +1,67 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# ==============================================================================
+# Oracle Linux 9 & Oracle Database 19c SE2 Lab Environment
+# Tailored for Chapter 01 (Architecture) & Chapter 02 (Hardware Sizing)
+# Box Source: https://yum.oracle.com/boxes/
+# ==============================================================================
+
+Vagrant.configure("2") do |config|
+  # ----------------------------------------------------------------------------
+  # 1. Box Specification (Oracle Linux 9 from yum.oracle.com)
+  # ----------------------------------------------------------------------------
+  config.vm.box = "oraclelinux/9"
+  config.vm.box_url = "https://oracle.github.io/vagrant-projects/boxes/oraclelinux/9.json"
+  config.vm.box_check_update = true
+
+  # ----------------------------------------------------------------------------
+  # 2. Hostname & Network Configuration
+  # ----------------------------------------------------------------------------
+  config.vm.hostname = "ol9-se2.localdomain"
+
+  # Host-only Private Network for direct access from host
+  config.vm.network "private_network", ip: "192.168.56.19"
+
+  # Port Forwarding (Oracle Net Listener 1521, EM Express 5500)
+  config.vm.network "forwarded_port", guest: 1521, host: 1521, auto_correct: true
+  config.vm.network "forwarded_port", guest: 5500, host: 5500, auto_correct: true
+
+  # ----------------------------------------------------------------------------
+  # 3. Chapter 02 Storage Architecture: OFA Disks (Dynamically Allocated)
+  #    /u01 (App): 30GB, /u02 (Data): 20GB, /u03 (Redo1): 5GB,
+  #    /u04 (Redo2): 5GB, /u05 (FRA): 20GB
+  # ----------------------------------------------------------------------------
+  config.vm.disk :disk, size: "30GB", name: "u01_app"
+  config.vm.disk :disk, size: "20GB", name: "u02_data"
+  config.vm.disk :disk, size: "5GB",  name: "u03_redo1"
+  config.vm.disk :disk, size: "5GB",  name: "u04_redo2"
+  config.vm.disk :disk, size: "20GB", name: "u05_fra"
+
+  # ----------------------------------------------------------------------------
+  # 4. VirtualBox Provider & Resource Sizing
+  #    Host: AMD Ryzen 7 5800H (8 Cores / 16 Threads), 16GB RAM, 110GB SSD
+  #    VM Sizing: 2 vCPUs, 6144MB RAM (6GB, leaving ~10GB for host)
+  # ----------------------------------------------------------------------------
+  config.vm.provider "virtualbox" do |vb|
+    vb.name = "OracleLinux9_SE2_Lab"
+    vb.cpus = (ENV['VM_CPUS'] || 2).to_i
+    vb.memory = (ENV['VM_MEMORY'] || 6144).to_i
+    vb.gui = false # Strict Headless / Minimal mode (Chapter 1 Section 1.3)
+
+    # VirtualBox performance & network tuning
+    vb.customize ["modifyvm", :id, "--audio", "none"]
+    vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+    vb.customize ["modifyvm", :id, "--nictype1", "82540EM"]
+    vb.customize ["modifyvm", :id, "--nictype2", "82540EM"]
+  end
+
+  # ----------------------------------------------------------------------------
+  # 5. Base OS Provisioning (Chapter 1 & Chapter 2 Base Config)
+  #    Only boots Oracle Linux 9 with base settings and swap sizing.
+  # ----------------------------------------------------------------------------
+  config.vm.provision "shell", path: "scripts/setup_os_base.sh"
+
+  # Note: Storage setup for Chapter 2 can be executed inside VM anytime:
+  # sudo /vagrant/scripts/setup_storage_ch2.sh
+end
