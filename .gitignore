@@ -1,0 +1,221 @@
+# ==============================================================================
+# Security & Sensitive Files (Public Repository Protection)
+# ==============================================================================
+# Environment variables & configuration secrets
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Secret tokens, credentials, certificates, and private/public keys
+*.pem
+*.key
+*.pkcs12
+*.pfx
+*.p12
+*.crt
+*.cer
+*.der
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+id_ecdsa
+id_ecdsa.pub
+id_dsa
+id_dsa.pub
+*.secret
+*.token
+tokens.json
+credentials.json
+service_account*.json
+client_secret*.json
+
+# Cloud provider credentials
+.aws/
+.azure/
+.gcloud/
+.netrc
+
+# ==============================================================================
+# Oracle Database Specific Files
+# ==============================================================================
+# Oracle Wallets, keystores, and credentials
+cwallet.sso
+ewallet.p12
+*.wallet
+*.sso
+*.jks
+wallet_*.zip
+
+# Oracle Trace, Dump, Alert & Log files
+*.trc
+*.trm
+core_*
+alert_*.log
+*.dmp
+*.dpdump
+*.log
+*.spool
+*.spl
+orapw*
+pwd*.ora
+
+# Local Oracle Network configuration overrides
+tnsnames.ora.local
+listener.ora.local
+sqlnet.ora.local
+
+# ==============================================================================
+# VirtualBox & Virtualization Artifacts
+# ==============================================================================
+# VirtualBox VM settings & states
+*.vbox
+*.vbox-prev
+*.vbox-tmp
+*.sav
+*.savedstate
+*.nvram
+
+# Virtual Disks (GBs of disk image data)
+*.vdi
+*.vmdk
+*.vhd
+*.vhdx
+*.hdd
+*.qcow2
+
+# VM Export appliances & screen recordings
+*.ova
+*.ovf
+*.webm
+
+# VirtualBox logs & runtime directories
+VBox.log*
+VBoxHardening.log*
+VirtualBox VMs/
+.vagrant/
+*.box
+
+# ==============================================================================
+# Python
+# ==============================================================================
+# Byte-compiled / optimized / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing & Coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Type checking / Linters
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# ==============================================================================
+# Go (Golang)
+# ==============================================================================
+# Compiled binaries and packages
+bin/
+pkg/
+*.exe
+*.exe~
+*.dll
+*.dylib
+
+# Test binaries
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Go vendor (uncomment if you do not want to track vendored dependencies)
+# vendor/
+
+# ==============================================================================
+# Operating System & IDE Files
+# ==============================================================================
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+
+# IDE / Editors
+.idea/
+*.iml
+*.iws
+*.swp
+*.swo
+
+# VS Code (preserve shared workspace settings if desired, ignore local state)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.history/
