@@ -1,215 +1,280 @@
+<!-- 
+  [출판 조판 및 폰트 지정 명세 (Typography Specification)]
+  - 본문(Body), 표(Table), 캡션(Caption), 영문 기술 용어: Noto Sans KR (Regular/Medium)
+  - 장/절 제목(Headings H1~H4): Noto Sans KR Bold
+  - 코드, 명령어, SQL 및 설정 블록(Code/SQL Blocks): DejaVu Sans Mono
+-->
+
 # CHAPTER 12. Silent Mode 설치 트러블슈팅 및 로그 분석
 
-그래픽 사용자 인터페이스(GUI)가 배제된 Headless(Non-GUI) CUI 환경에서 `runInstaller -silent`, `netca -silent`, `dbca -silent` 명령을 활용하여 데이터베이스를 구축할 때, 설치 오류나 인스턴스 구동 실패가 발생하면 대화형 팝업 창이 뜨지 않으므로 즉각적인 원인 파악이 어려울 수 있습니다 (출처: administrators-reference-linux-and-unix-based-operating-systems.pdf, 2019; database-administrators-guide.pdf, 2019). 따라서 터미널 출력 메시지와 로그 파일의 정밀 분석을 통해 기술적 원인을 규명하고 조치하는 트러블슈팅(Troubleshooting) 역량이 필수적입니다.
+그래픽 사용자 인터페이스(GUI)를 완전히 배제한 Headless(Non-GUI) CLI 환경에서 `runInstaller -silent`, `netca -silent`, `dbca -silent`, `opatch apply -silent` 명령어로 데이터베이스를 구축할 때는 대화형 경고 팝업 창이 뜨지 않습니다. 따라서 설치 중단이나 인스턴스 기동 실패가 발생했을 때, 각 유틸리티가 남기는 로그 파일의 정확한 위치를 찾아내고 에러 코드의 근본 원인을 분석해 해결하는 **트러블슈팅(Troubleshooting) 역량**이 실무 성패를 좌우합니다.
 
-본 장에서는 Silent Mode 설치 관련 핵심 로그 수집 위치, 사전 환경 검증 우회 옵션(`-ignorePrereqFailure`)의 리스크 및 올바른 활용법, 그리고 리스너 바인딩(`ORA-00119`/`ORA-00132`), 메모리 부족(`ORA-04031`), UEK R7 커널 `io_uring` 권한 예외 등 주요 CUI 에러에 대한 원인 분석 및 해결 절차를 단계별로 다룹니다.
+본 장에서는 오라클 Silent Mode 구축 및 운영 단계별 핵심 로그 아키텍처와 `adrci` 진단 기법을 살펴보고, 사전 환경 검증 우회 옵션(`-ignorePrereqFailure`)의 위험성과 올바른 대응 프로세스를 다룹니다. 이어서 현장에서 가장 빈번하게 마주치는 리스너 바인딩 오류(`ORA-00119`/`ORA-00132`), 공유 메모리 및 HugePages 할당 오류(`ORA-04031`/`ORA-27137`), 그리고 Oracle Linux 9 UEK R7 커널의 `io_uring` 권한 오류에 대한 명쾌한 해결 절차를 정리합니다.
 
 ---
 
-## 12.1 Silent Mode 설치 중 발생 로그 수집 및 분석 위치
+## 12.1 Silent Mode 설치 및 운영 로그 아키텍처와 분석 기법
 
-### 오라클 인벤토리 및 도구별 로그 디렉토리 아키텍처
+### 1. 오라클 인벤토리 및 유틸리티별 로그 디렉터리 구조
 
-Silent Mode 설치 프로세스는 각 컴포넌트별로 독립된 디렉토리에 실행 이력과 오류 스택 트레이스를 기록합니다 (출처: clusterware-administration-and-deployment-guide.pdf, 2019; real-application-clusters-administration-and-deployment-guide.pdf, 2026). 문제가 발생했을 때 가장 먼저 점검해야 하는 핵심 로그 저장소 위치는 다음과 같습니다.
+오라클의 설치 및 구성 도구들은 작업 성격에 따라 **① 중앙 인벤토리 로그 디렉터리(`oraInventory/logs`)**, **② 구성 도구 로그 디렉터리(`cfgtoollogs`)**, **③ 자동 진단 저장소(`ADR, Automatic Diagnostic Repository`)**의 세 곳에 실행 이력과 상세 스택 트레이스(Stack Trace)를 기록합니다.
 
 ```mermaid
-graph TD
-    subgraph Oracle Log Architecture
-        Inventory[/u01/app/oraInventory/logs/] -->|OUI Engine Logs| OUI_LOG[installActions*.log / silentInstall*.log]
-        CFGTool[/u01/app/oracle/cfgtoollogs/] -->|DBCA Logs| DBCA_LOG[dbca/gdbName/trace.log]
-        CFGTool -->|NETCA Logs| NETCA_LOG[netca/netca.log]
-        CFGTool -->|OPatch Logs| OPATCH_LOG[opatch/opatch*.log]
-        ADR[/u01/app/oracle/diag/rdbms/...] -->|Instance Alert Log| ALERT_LOG[alert_SID.log / alert.xml]
+flowchart TD
+    subgraph LogArch["Oracle Database 19c 핵심 로그 저장소 아키텍처"]
+        INV["1. 중앙 인벤토리 로그<br/>/u01/app/oraInventory/logs/"]
+        CFG["2. 구성 및 패치 도구 로그<br/>$ORACLE_BASE/cfgtoollogs/ 및 $ORACLE_HOME/cfgtoollogs/"]
+        ADR["3. 인스턴스 및 리스너 ADR 로그<br/>$ORACLE_BASE/diag/"]
+
+        INV --> OUI["• installActions&lt;timestamp&gt;.log<br/>• silentInstall&lt;timestamp&gt;.log<br/>• oraInstall&lt;timestamp&gt;.err/.out"]
+        CFG --> DBCA["• dbca/&lt;db_name&gt;/trace.log_<timestamp><br/>• netca/trace_OraDB19Home1-&lt;timestamp&gt;.log<br/>• opatch/opatch&lt;timestamp&gt;.log<br/>• sqlpatch/&lt;patch_id&gt;/&lt;id&gt;/*.log"]
+        ADR --> ALRT["• rdbms/&lt;db_name&gt;/&lt;SID&gt;/trace/alert_&lt;SID&gt;.log<br/>• tnslsnr/&lt;hostname&gt;/listener/trace/listener.log"]
     end
 ```
+*그림 12-1: Oracle 19c Silent Mode 구축 및 운영 단계별 핵심 로그 디렉터리 구조*
 
-#### 표 12-1. Silent Mode 구축 작업별 핵심 로그 파일 경로 명세
-
-| 구축 작업 구분 | 주요 로그 파일 경로 | 기재 내용 및 진단 목적 |
+| 작업 단계 구분 | 핵심 로그 파일 절대 경로 | 기록 내용 및 주요 진단 목적 |
 | :--- | :--- | :--- |
-| **OUI 엔진 설치** | `/u01/app/oraInventory/logs/installActions<timestamp>.log` | OUI 패키지 추출, 의존성 검증, 바이너리 링크 오류 기록 (출처: clusterware-administration-and-deployment-guide.pdf, 2019) |
-| **OUI Silent 결과** | `/u01/app/oraInventory/logs/silentInstall<timestamp>.log` | 비대화형 설치 성공/실패 최종 요약 리포트 (출처: high-availability-overview-and-best-practices.pdf, 2026) |
-| **DBCA DB 생성** | `$ORACLE_BASE/cfgtoollogs/dbca/<gdbName>/trace.log` | DBCA 커맨드라인 파라미터 파싱, SQL 스크립트 실행 에러 기록 (출처: real-application-clusters-administration-and-deployment-guide.pdf, 2026) |
-| **NETCA 리스너** | `$ORACLE_BASE/cfgtoollogs/netca/netca.log` | 리스너 포트 바인딩 및 프로파일 생성 실패 내역 기록 |
-| **OPatch RU 패치** | `$ORACLE_HOME/cfgtoollogs/opatch/opatch<timestamp>.log` | 바이너리 이치 패치 충돌, 파일 백업 및 적용 실패 내역 (출처: high-availability-overview-and-best-practices.pdf, 2026) |
-| **인스턴스 얼럿** | `$ORACLE_BASE/diag/rdbms/<db_name>/<SID>/trace/alert_<SID>.log` | DB 구동 중 ORA- 에러, 메모리 할당 및 파라미터 실패 내역 (출처: database-administrators-guide.pdf, 2019; database-concepts.pdf, 2019) |
+| **OUI 엔진 설치 (`runInstaller`)** | `/u01/app/oraInventory/logs/installActions<timestamp>.log` | 사전 요구사항 검증 결과, 패키지 압축 해제, C 바이너리 링크(`make`) 상세 로그 |
+| **OUI Silent 요약** | `/u01/app/oraInventory/logs/silentInstall<timestamp>.log` | `-silent` 모드 실행 시 발생한 핵심 경고 및 실패 사유 요약본 |
+| **NETCA 리스너 구성** | `$ORACLE_BASE/cfgtoollogs/netca/trace_OraDB19Home1-<timestamp>.log` | 리스너 포트(`1521`) 충돌, 호스트명 풀이 실패, `listener.ora` 생성 오류 기록 |
+| **DBCA DB 생성** | `$ORACLE_BASE/cfgtoollogs/dbca/<gdbName>/trace.log_<timestamp>` | DBCA 파라미터 검증, 메모리/파일 생성, 카탈로그 생성 SQL 오류 기록 |
+| **OPatch 바이너리 패치** | `$ORACLE_HOME/cfgtoollogs/opatch/opatch<timestamp>.log` | RU/MRP 패치 충돌 검증, 파일 백업, 바이너리 재링크 오류 기록 |
+| **`datapatch` SQL 패치** | `$ORACLE_BASE/cfgtoollogs/sqlpatch/sqlpatch_<pid>_<timestamp>/` | 멀티테넌트(`CDB$ROOT`, `PDB$SEED`, `ORCLPDB1`) 데이터 딕셔너리 패치 결과 |
+| **DB 인스턴스 기동/운영** | `$ORACLE_BASE/diag/rdbms/orcl/orcl/trace/alert_orcl.log` | 인스턴스 기동 파라미터, HugePages 할당표, `ORA-` 에러 및 백그라운드 트레이스 |
+
+*표 12-1: Silent Mode 구축 및 운영 단계별 핵심 로그 파일 명세*
 
 ---
 
-### CLI 기반 실시간 로그 모니터링 기법 (`tail -f` & `grep`)
+### 2. CLI 기반 실시간 로그 모니터링 및 `adrci` 활용법
 
-GUI 모드가 없는 CUI 환경에서는 설치 명령 구동 직후 백그라운드에서 생성되는 로그를 실시간 추적하거나 키워드 검색을 수행하여 에러 원인을 진단합니다.
+Silent 설치나 DB 생성이 진행되는 동안 별도의 SSH 터미널 세션을 열어 실시간으로 로그를 추적(`tail -f`)하거나, 오라클 공식 진단 유틸리티인 **`adrci`**를 활용하면 문제 발생 즉시 원인을 포착할 수 있습니다.
 
 ```bash
-# 1. 가장 최근 생성된 OUI 설치 로그 실시간 추적
+# 1. 가장 최근에 생성된 OUI 설치 로그 파일을 실시간으로 추적
 $ tail -f $(ls -t /u01/app/oraInventory/logs/installActions*.log | head -n 1)
 
-# 2. DBCA 생성 과정 중 발생한 Severe/Fatal 오류 추출
-$ grep -E "SEVERE|FATAL|ERROR" $ORACLE_BASE/cfgtoollogs/dbca/orcl/trace.log
+# 2. DBCA 데이터베이스 생성 로그에서 심각한 에러(SEVERE / FATAL / ORA-)만 필터링
+$ grep -E "SEVERE|FATAL|ORA-" $ORACLE_BASE/cfgtoollogs/dbca/orcl/trace.log*
 
-# 3. 데이터베이스 Alert Log 내 ORA- 에러 필터링
-$ grep "ORA-" $ORACLE_BASE/diag/rdbms/orcl/orcl/trace/alert_orcl.log
+# 3. 데이터베이스 Alert Log에서 최근 발생한 ORA- 에러 및 전후 문맥(위아래 3줄) 확인
+$ grep -C 3 "ORA-" $ORACLE_BASE/diag/rdbms/orcl/orcl/trace/alert_orcl.log
+
+# 4. 오라클 공식 ADRCI 유틸리티를 활용한 실시간 Alert Log 모니터링 및 인시던트(Incident) 조회
+$ adrci exec="set homepath diag/rdbms/orcl/orcl; show alert -tail -f"
+$ adrci exec="set homepath diag/rdbms/orcl/orcl; show problem"
 ```
 
 ---
 
-## 12.2 Prerequisite Check Silent Bypass 옵션 활용
+## 12.2 사전 검증 우회 옵션(`-ignorePrereqFailure`)의 위험성과 올바른 대응
 
-### `-ignorePrereqFailure` 파라미터의 역할과 오용 시의 위험성
+### 1. `-ignorePrereqFailure` 옵션의 역할과 남용 시 발생하는 치명적 문제
 
-OUI 엔진 설치 시 `./runInstaller -silent` 명령 뒤에 **`-ignorePrereqFailure`** 파라미터를 추가하면, OS 커널 파라미터 미달, 패키지 미설치, Swap 용량 부족 등 사전 검증(Prerequisite Check) 단계에서 탐지된 경고 및 에러 항목을 무시하고 강제로 바이너리 설치를 계속 진행합니다.
+`$ORACLE_HOME/runInstaller -silent` 또는 `dbca -silent` 실행 시 **`-ignorePrereqFailure`** 옵션을 부여하면, OS 커널 파라미터 미달, 필수 RPM 패키지 누락, 스왑 공간 부족 등 사전 요구사항 검증(Prerequisite Checks) 단계에서 실패(`FAILED`)가 발견되더라도 이를 강제로 무시하고 다음 단계로 넘어갑니다.
 
-#### ⚠️ [주의] `-ignorePrereqFailure` 남용으로 인한 심각한 결과
+> ⚠️ **주의(Caution): 실무 운영 서버에서 `-ignorePrereqFailure`를 무분별하게 사용하면 안 되는 이유**
+> 원인을 해결하지 않은 채 `-ignorePrereqFailure`로 경고를 덮어버리면 설치 자체는 끝나는 것처럼 보이지만, 다음과 같은 치명적인 후유증이 발생합니다.
+> * **바이너리 컴파일 및 링크 실패 (`Error in invoking target ... of makefile ins_rdbms.mk`)**: `libaio-devel`, `glibc-devel`, `libnsl` 등 핵심 라이브러리가 누락된 상태에서 강제 설치하면 `$ORACLE_HOME/bin/oracle` 실행 파일 링크 단계에서 오류가 발생하여 엔진이 정상 작동하지 않습니다.
+> * **DBCA 인스턴스 생성 중단 및 런타임 패닉**: 커널 공유 메모리(`shmmax`, `shmall`), 비동기 I/O(`fs.aio-max-nr`), 혹은 사용자 리소스 한도(`memlock`, `nofile`)가 부족한 상태에서 DB를 생성하면 기동 도중 `ORA-27102: out of memory` 또는 `ORA-27090: Unable to reserve kernel resources for asynchronous disk I/O` 에러가 발생하며 중단됩니다.
 
-이 옵션은 개발 및 테스트 환경에서 경미한 OS 경고를 건너뛰기 위한 목적으로 제공됩니다. 필수 패키지나 커널 파라미터 결함을 수정한 조치 없이 이 옵션을 남용하여 강제 설치할 경우 다음과 같은 심각한 문제가 발생할 수 있습니다.
+```mermaid
+flowchart LR
+    ERR["사전 요구사항 검증 실패<br/>(Prerequisite Check Failed)"]
+    GOOD["올바른 정석 대응<br/>1. installActions*.log 원인 분석<br/>2. dnf 패키지 설치 / sysctl 튜닝<br/>3. -executePrereqs 재검증 통과"]
+    BAD["잘못된 임시방편 대응<br/>-ignorePrereqFailure 강제 우회"]
+    RES_OK["무결성이 보장된<br/>엔터프라이즈 DB 구축 완료"]
+    RES_FAIL["바이너리 링크 오류(ins_rdbms.mk)<br/>및 DBCA/런타임 크래시 발생"]
 
-* **C 컴파일러 링킹 실패 (`ins_rdbms.mk` Error)**: `glibc-devel` 또는 `libaio-devel` 패키지가 결여된 상태에서 설치를 강제할 경우 오라클 홈 바이너리 링킹 단계에서 결정적 오류가 유발됩니다.
-* **DBCA 인스턴스 생성 중 크래시**: 커널 파라미터(`fs.aio-max-nr`, `sysctl`) 수치가 부족한 상태에서는 `dbca -silent` 실행 중 비동기 I/O 실패로 인해 인스턴스 생성이 중간에 정지됩니다.
-
+    ERR --> GOOD --> RES_OK
+    ERR -.->|금지| BAD -.-> RES_FAIL
 ```
-[ 사전 검증 실패 (Prerequisite Failure) ]
-        │
-        ├── 올바른 대응 ──> 로그 분석 ──> dnf 패키지 설치 / sysctl 튜닝 ──> 재검증 통과
-        │
-        └── 잘못된 대응 ──> -ignorePrereqFailure 강제 우회 ──> 바이너리 링킹/DBCA 크래시 발생
-```
+*그림 12-2: 사전 요구사항 검증 실패 시의 정석 대응과 강제 우회 비교*
 
 ---
 
-### 사전 검증 실패 시의 올바른 조치 프로세스
+### 2. 사전 검증 독립 실행(`-executePrereqs`) 및 바이너리 재링크(`relink all`) 절차
 
-`-ignorePrereqFailure` 파라미터에 의존하기보다, 사전 검증 실패 항목을 명확히 확인하고 해결한 후 정식으로 통과시키는 것이 안전합니다.
+실제 설치를 시작하기 전에 사전 요구사항만 단독으로 점검하려면 **`-executePrereqs`** 옵션을 사용합니다.
 
 ```bash
-# 1. -executeSysPrereqs 옵션을 통한 사전 검증 독립 실행
+# 1. Oracle Linux 9 호환 환경 변수 선언 후 사전 검증만 단독 실행 (-executePrereqs)
+$ export CV_ASSUME_DISTID=OL8
 $ cd $ORACLE_HOME
-$ ./runInstaller -silent -executeSysPrereqs -responseFile /u01/app/oracle/stage/db_install.rsp
+$ ./runInstaller -executePrereqs -silent -responseFile /u01/stage/db_install.rsp
 
-# 2. 검증 결과 로그 확인 및 부족한 패키지 설치
-$ grep "Failed" /u01/app/oraInventory/logs/installActions*.log
-[SEVERE] - Missing package: libaio-devel-0.3.112
+# 2. 만약 검증 실패 항목이 보고되면 로그에서 정확한 누락 패키지/파라미터 확인
+$ grep -B 2 -A 4 "FAILED" $(ls -t /u01/app/oraInventory/logs/installActions*.log | head -n 1)
 
-$ sudo dnf install -y libaio-devel
-
-# 3. 사전 검증 재실행 후 통과 확인 후 정식 설치 구동
-$ ./runInstaller -silent -responseFile /u01/app/oracle/stage/db_install.rsp
+# 3. 누락된 OS 패키지 보완 설치 및 커널 파라미터 반영 후 재실행
+$ sudo dnf install -y libnsl libaio-devel
+$ sudo sysctl --system
 ```
+
+> 💡 **노트(Note): OS 패키지 누락을 뒤늦게 해결한 후 오라클 바이너리를 재컴파일(`relink all`)하는 방법**
+> 만약 필수 OS 라이브러리(`libnsl` 등)가 빠진 상태에서 이미 `runInstaller`를 실행해 링크 경고가 발생했다면, 부족한 RPM 패키지를 `dnf install`로 설치한 뒤 모든 오라클 프로세스를 내리고 아래 명령을 실행하면 `$ORACLE_HOME`의 전체 바이너리를 깨끗하게 재링크(Relink)할 수 있습니다.
+> ```bash
+> $ cd $ORACLE_HOME/bin
+> $ ./relink all
+> ```
 
 ---
 
-## 12.3 주요 CUI 설치 및 구동 에러 대응
+## 12.3 주요 CUI 설치 및 구동 에러 완벽 해결
 
-### 1. `ORA-00119` & `ORA-00132`: Listener 바인딩 및 `LOCAL_LISTENER` 파라미터 오류
+### 1. `ORA-00119` & `ORA-00132`: `LOCAL_LISTENER` 네트워크 이름 풀이 오류
 
-`dbca -silent` 구동 또는 데이터베이스 `STARTUP` 시점에 가장 빈번하게 발생하는 네트워킹 관련 에러 스택입니다 (출처: database-net-services-administrators-guide.pdf, 2019).
+DBCA 생성 직후 또는 서버 환경 변경 후 `STARTUP`을 실행할 때 가장 흔히 마주치는 네트워크 파라미터 에러입니다.
 
 ```text
+SQL> STARTUP;
 ORA-00119: invalid specification for system parameter LOCAL_LISTENER
 ORA-00132: syntax error or unresolved network name 'LISTENER_ORCL'
 ```
 
-#### 발생 원인
+#### ① 발생 원인
+데이터베이스 초기화 파라미터 `LOCAL_LISTENER`에 별칭(예: `LISTENER_ORCL`)이 지정되어 있으나, 정작 `$ORACLE_HOME/network/admin/tnsnames.ora` 파일에 `LISTENER_ORCL` 항목이 빠져 있거나 오타(괄호 불일치, 잘못된 호스트명 등)가 있어 인스턴스가 리스너 주소를 해석(Name Resolution)하지 못할 때 발생합니다.
 
-데이터베이스 초기화 파라미터인 `LOCAL_LISTENER`에 지정된 식별자 이름(`LISTENER_ORCL`)이 오라클 서버의 `$ORACLE_HOME/network/admin/tnsnames.ora` 파일 내에 정의되어 있지 않거나, 구문 문법 오류가 존재하여 LREG 프로세스가 네트워크 주소를 풀이(Name Resolution)하지 못하기 때문에 발생합니다 (출처: database-net-services-administrators-guide.pdf, 2019).
+#### ② 해결 방법 (상황별 2가지 정석 해법)
 
-#### 트러블슈팅 수순
+> ⚠️ **주의(Caution)**: `ORA-00119`/`ORA-00132` 에러는 인스턴스가 `NOMOUNT` 단계조차 진입하기 전에 발생합니다. 따라서 인스턴스가 내려가 있는(`Connected to an idle instance`) 상태에서 곧바로 `ALTER SYSTEM SET local_listener=... SCOPE=BOTH;`를 실행하면 `ORA-01034: ORACLE not available` 에러가 발생하며 실행되지 않습니다! 반드시 아래 두 가지 방법 중 하나로 조치해야 합니다.
 
-`tnsnames.ora` 파일에 `LOCAL_LISTENER`가 참조할 식별자 별칭을 추가하거나, IP 및 포트 주소를 직접 지정하도록 수정합니다 (출처: database-net-services-administrators-guide.pdf, 2019).
+* **해법 A (`tnsnames.ora`에 별칭 추가 — 가장 빠르고 간편한 권장 방법)**:
+  `$ORACLE_HOME/network/admin/tnsnames.ora` 파일을 열어 에러 메시지가 찾고 있는 `LISTENER_ORCL` 별칭 블록을 정확히 추가한 뒤 곧바로 `STARTUP`을 실행합니다.
 
 ```ini
-# $ORACLE_HOME/network/admin/tnsnames.ora 파일 내 식별자 추가
+# 1. $ORACLE_HOME/network/admin/tnsnames.ora 파일에 LISTENER_ORCL 블록 추가
 LISTENER_ORCL =
-  (ADDRESS = (PROTOCOL = TCP)(HOST = 192.0.2.100)(PORT = 1521))
+  (ADDRESS = (PROTOCOL = TCP)(HOST = 192.168.56.10)(PORT = 1521))
 ```
 
-또는 PFILE/SPFILE 환경에서 `LOCAL_LISTENER` 주소를 명시적인 Address 문법으로 직접 재설정합니다 (출처: database-net-services-administrators-guide.pdf, 2019).
-
 ```sql
--- SQL*Plus 접속 후 LOCAL_LISTENER 주소 직접 반영
-SQL> ALTER SYSTEM SET LOCAL_LISTENER='(ADDRESS=(PROTOCOL=TCP)(HOST=192.0.2.100)(PORT=1521))' SCOPE=BOTH;
-System altered.
-
+-- 2. SPFILE 수정 없이 즉시 인스턴스 정상 기동 가능
+$ sqlplus / as sysdba
 SQL> STARTUP;
 ORACLE instance started.
+... (중략) ...
 Database mounted.
 Database opened.
 ```
 
----
-
-### 2. `ORA-04031`: Shared Pool 메모리 부족 및 AMM / HugePages 불일치
-
-인스턴스 기동 중 또는 DBCA 수행 과정에서 메모리를 할당받지 못할 때 나타나는 오류입니다 (출처: automatic-storage-management-administrators-guide.pdf, 2019; database-reference.pdf, 2019).
-
-```text
-ORA-04031: unable to allocate 4192 bytes of shared memory ("shared pool","unknown object","sga heap(1,0)","Library cache")
-```
-
-#### 발생 원인
-
-1. **Shared Pool 산정 크기 부족**: 공유 풀(`SHARED_POOL_SIZE`) 용량이 너무 작게 설정되어 내부 SGA 오버헤드나 SQL 파싱 객체를 수용하지 못하는 경우 발생합니다 (출처: database-administrators-guide.pdf, 2019; database-performance-tuning-guide.pdf, 2019).
-2. **AMM과 Static HugePages 충돌**: Linux 환경에서 `MEMORY_TARGET`(AMM)을 사용하면서 커널의 Static HugePages가 활성화되어 있어 메모리 할당이 세그먼트 단위로 실패하는 경우 발생합니다 (출처: database-reference.pdf, 2019).
-3. **`vm.nr_hugepages` 할당량 미달**: `USE_LARGE_PAGES = ONLY`로 설정되었으나 OS 커널에 고정된 HugePages 개수가 `SGA_TARGET` 필요량보다 부족한 경우 발생합니다.
-
-#### 표 12-2. `ORA-04031` 진단 항목 및 조치 방안
-
-| 진단 항목 | 현상 및 원인 | 해결 및 조치 방법 |
-| :--- | :--- | :--- |
-| **Shared Pool 용량 미달** | Shared Pool 영역 단편화 및 파싱 공간 고갈 | `SGA_TARGET` 또는 `SHARED_POOL_SIZE` 크기 확장 (출처: database-administrators-guide.pdf, 2019; database-performance-tuning-guide.pdf, 2019) |
-| **AMM 사용 충돌** | `MEMORY_TARGET` 설정 시 Static HugePages 미지원 | AMM을 비활성화(`MEMORY_TARGET=0`)하고 ASMM(`SGA_TARGET`)으로 전환 (출처: database-reference.pdf, 2019) |
-| **HugePages 개수 부족** | `vm.nr_hugepages` 설정치가 SGA 필요량보다 작음 | `/etc/sysctl.d/99-oracle.conf` 내 `vm.nr_hugepages` 수치 확대 반영 |
-
-#### 트러블슈팅 수순
-
-ASMM 방식으로 전환하고 `SGA_TARGET` 및 `PGA_AGGREGATE_TARGET`을 명시적으로 할당합니다 (출처: database-administrators-guide.pdf, 2019).
+* **해법 B (`PFILE`을 거쳐 `SPFILE` 내부의 `LOCAL_LISTENER` 값 자체를 수정하는 방법)**:
+  만약 `SPFILE` 안에 잘못 입력된 `LOCAL_LISTENER` 값을 직접 고치고 싶다면, `PFILE`로 추출하여 수정한 후 `SPFILE`을 재생성하거나, 일단 `PFILE`로 인스턴스를 기동한 뒤 `ALTER SYSTEM`으로 `SPFILE`을 갱신합니다.
 
 ```sql
--- 1. AMM 비활성화 및 ASMM 파라미터 재지정
-SQL> ALTER SYSTEM SET MEMORY_TARGET = 0 SCOPE = SPFILE;
-SQL> ALTER SYSTEM SET SGA_TARGET = 4G SCOPE = SPFILE;
-SQL> ALTER SYSTEM SET PGA_AGGREGATE_TARGET = 2G SCOPE = SPFILE;
-SQL> ALTER SYSTEM SET SHARED_POOL_SIZE = 1280M SCOPE = SPFILE;
+-- 1. SPFILE로부터 텍스트 PFILE 추출
+$ sqlplus / as sysdba
+SQL> CREATE PFILE='/tmp/initorcl.ora' FROM SPFILE;
+```
 
--- 2. 인스턴스 재시동
-SQL> SHUTDOWN IMMEDIATE;
+`/tmp/initorcl.ora` 파일에서 `*.local_listener` 줄을 아래와 같이 명시적 주소 문자열로 수정한 뒤 저장합니다.
+```ini
+*.local_listener='(ADDRESS=(PROTOCOL=TCP)(HOST=192.168.56.10)(PORT=1521))'
+```
+
+```sql
+-- 2. 수정된 PFILE로 SPFILE을 덮어쓴 뒤 인스턴스 기동
+SQL> CREATE SPFILE FROM PFILE='/tmp/initorcl.ora';
 SQL> STARTUP;
 ```
 
 ---
 
-### 3. UEK R7 커널 `io_uring` 권한 및 비동기 I/O 관련 예외 처리
+### 2. `ORA-04031`(Shared Pool 고갈) 및 `ORA-27137`(HugePages 할당 실패)
 
-Oracle Linux 9 UEK R7 커널 환경에서 ASMLIB v3.0 구동 시 디스크 헤더를 읽지 못하거나 `oracleasm init`이 실패하는 오류입니다.
+메모리 구성과 관련하여 운영 중 발생하는 대표적인 에러는 런타임 공유 풀 단편화 에러인 **`ORA-04031`**과 인스턴스 기동 시 HugePages 부족 에러인 **`ORA-27137`**입니다.
 
 ```text
-Checking if io_uring is accessible to the configured DB user: no
-OAM-00005: error opening ASM device /dev/sdb1: Permission denied
+-- [사례 A] 운영 또는 패치(datapatch) 중 Shared Pool/Large Pool 메모리 단편화 및 고갈
+ORA-04031: unable to allocate 4192 bytes of shared memory ("shared pool","unknown object","sga heap(1,0)","library cache")
+
+-- [사례 B] USE_LARGE_PAGES=ONLY 설정 상태에서 인스턴스 기동 시 OS HugePages 부족
+ORA-27137: unable to allocate Large Pages to create a shared memory segment
+Linux-x86_64 Error: 12: Cannot allocate memory
 ```
 
-#### 발생 원인
+| 에러 코드 | 주요 발생 원인 | 핵심 해결 조치 |
+| :--- | :--- | :--- |
+| **`ORA-04031`** | • `SGA_TARGET` 전체 크기 부족 또는 버퍼 캐시 쏠림으로 인한 `Shared Pool`/`Large Pool` 축소<br/>• 바인드 변수 미사용(Hard Parsing 과다)으로 인한 Shared Pool 단편화 | • ASMM 환경에서 `SHARED_POOL_SIZE` 및 `LARGE_POOL_SIZE`의 **최소 보장 하한선(Minimum Floor)** 설정<br/>• 필요시 `SGA_TARGET` 증설 및 `ALTER SYSTEM FLUSH SHARED_POOL` (임시 조치) |
+| **`ORA-27137`** | • `USE_LARGE_PAGES = ONLY` 설정 시 OS의 가용 HugePages(`HugePages_Free`)가 `SGA_MAX_SIZE`보다 부족함<br/>• `limits.d` 또는 `oracle.service`의 `memlock` 한도 미달 | • `/etc/sysctl.d/99-oracle-database-preinstall-19c-sysctl.conf`의 `vm.nr_hugepages` 수치를 늘린 후 `sysctl --system` 적용<br/>• `ulimit -l` 및 `systemd`의 `LimitMEMLOCK=infinity` 확인 |
 
-Oracle Linux 9 UEK R7 커널은 보안 강화를 위해 `io_uring` 시스템 콜 접근 권한을 제한할 수 있습니다. 커널 파라미터 `kernel.io_uring_disabled`가 `1`(그룹 제한)로 설정되어 있으나, 오라클 계정이 속한 OS 그룹(GID)이 `kernel.io_uring_group` 파라미터에 정상 등록되지 않았을 때 발생합니다.
+*표 12-2: 오라클 핵심 메모리 에러(`ORA-04031`, `ORA-27137`) 원인 및 해결 요약*
 
-#### 트러블슈팅 수순
+#### ① `ORA-04031` 해결을 위한 ASMM 최소 하한선(Floor) 고정
+ASMM(`SGA_TARGET`)을 사용하더라도 갑작스러운 버퍼 캐시 요구로 인해 Shared Pool이나 Large Pool이 지나치게 줄어들지 않도록 최소 보장 크기를 지정해 두는 것이 엔터프라이즈 모범 사례입니다.
 
-`oracle` 계정의 GID(예: `oinstall` - 54321 또는 `dba` - 54322)를 확인하고 `/etc/sysctl.d/io_uring.conf` 커널 파라미터를 보완 동기화합니다.
+```sql
+-- SGA_TARGET(11520M) 내에서 Shared Pool 최소 2G, Large Pool 최소 256M 하한선 보장
+SQL> ALTER SYSTEM SET shared_pool_size = 2G SCOPE=BOTH;
+SQL> ALTER SYSTEM SET large_pool_size = 256M SCOPE=BOTH;
+```
+
+#### ② `ORA-27137` 해결을 위한 OS HugePages 즉시 증설
+SGA를 증설했다가 `ORA-27137`로 기동이 거부된 경우, `root` 계정에서 필요한 2 MB 페이지 수(`SGA_MAX_SIZE(MB) / 2 + 여유분`)를 계산하여 커널에 즉시 반영합니다.
 
 ```bash
-# 1. oracle 계정의 Primary Group GID 확인
-$ id -g oracle
-54321
+# 예: SGA_MAX_SIZE를 16 GB(16,384 MB)로 늘린 경우 -> 최소 8192 + 여유분 = 8300 페이지 할당
+$ sudo sed -i 's/^vm.nr_hugepages.*/vm.nr_hugepages = 8300/' /etc/sysctl.d/99-oracle-database-preinstall-19c-sysctl.conf
+$ sudo sysctl --system
 
-# 2. io_uring 커널 파라미터 수정 (root 계정)
-$ sudo vi /etc/sysctl.d/io_uring.conf
-kernel.io_uring_disabled = 1
-kernel.io_uring_group = 54321
+# HugePages_Free가 8300개로 확보되었는지 확인 후 DB STARTUP 수행
+$ grep -E "HugePages_Total|HugePages_Free" /proc/meminfo
+```
 
-# 3. sysctl 동적 반영
-$ sudo sysctl -p /etc/sysctl.d/io_uring.conf
+---
 
-# 4. oracleasm 검증
+### 3. Oracle Linux 9 UEK R7 커널의 `io_uring` 및 ASMLib v3 권한 오류
+
+Oracle Linux 9의 기본 커널인 **UEK R7(Unbreakable Enterprise Kernel Release 7, `5.15.0`)** 환경에서 ASMLib v3(`oracleasm`)를 초기화하거나 디스크를 스캔할 때 다음과 같은 권한 거부 오류가 발생할 수 있습니다.
+
+```text
 $ sudo oracleasm status
-Checking if the oracleasm kernel module is loaded: no (Not required with kernel)
+Checking if the oracleasm kernel module is loaded: no (Not required with kernel 5.15.0)
+Checking if /dev/oracleasm is mounted: no (Not required with kernel 5.15.0)
+Checking which I/O Interface is in use: io_uring (KABI_V3)
+Checking if io_uring is enabled: yes
+Checking if io_uring is accessible to the configured DB user: no
+```
+
+#### ① 발생 원인
+Chapter 04(4.5절)에서 살펴보았듯, ASMLib v3는 과거의 `kmod-oracleasm` 커널 드라이버 대신 UEK R7 커널의 **`io_uring`(`KABI_V3`)** 비동기 I/O 인터페이스를 사용합니다. 이때 리눅스 커널 보안 파라미터인 `kernel.io_uring_disabled`가 `2`(전면 비활성화)로 되어 있거나, `1`(특정 그룹만 허용)로 설정되어 있으면서 `kernel.io_uring_group`에 지정된 GID가 `oracleasm configure`에 설정된 그룹(예: `dba` 그룹 `54322`)과 일치하지 않으면 `oracle` 계정의 `io_uring` 접근이 차단됩니다.
+
+#### ② 해결 절차
+
+`oracleasm configure`에 등록된 그룹의 GID를 확인하고, `/etc/sysctl.d/io_uring.conf` 파일의 `kernel.io_uring_group` 값을 정확히 일치시킨 뒤 반영합니다.
+
+```bash
+# 1. 현재 oracleasm에 설정된 소유자 및 그룹 확인 (예: oracle / dba)
+$ sudo oracleasm configure
+ORACLEASM_ENABLED=true
+ORACLEASM_UID=oracle
+ORACLEASM_GID=dba
+ORACLEASM_SCANBOOT=true
+ORACLEASM_SCANORDER=""
+ORACLEASM_SCANEXCLUDE=""
+ORACLEASM_SCAN_DIRECTORIES=""
+ORACLEASM_USE_LOGICAL_BLOCK_SIZE="false"
+ORACLEASM_IOFILTER="true"
+
+# 2. 해당 그룹(dba)의 정확한 GID 번호 확인
+$ getent group dba
+dba:x:54322:oracle
+
+# 3. /etc/sysctl.d/io_uring.conf에 io_uring 활성화 및 허용 GID(54322) 등록
+$ sudo tee /etc/sysctl.d/io_uring.conf << 'EOF'
+kernel.io_uring_disabled = 1
+kernel.io_uring_group = 54322
+EOF
+
+# 4. 커널 파라미터 즉시 동기화 및 oracleasm 재초기화
+$ sudo sysctl -p /etc/sysctl.d/io_uring.conf
+$ sudo oracleasm init
+
+# 5. io_uring 접근 권한이 'yes'로 정상 전환되었는지 최종 검증
+$ sudo oracleasm status
+Checking if the oracleasm kernel module is loaded: no (Not required with kernel 5.15.0)
+Checking if /dev/oracleasm is mounted: no (Not required with kernel 5.15.0)
 Checking which I/O Interface is in use: io_uring (KABI_V3)
 Checking if io_uring is enabled: yes
 Checking if io_uring is accessible to the configured DB user: yes
@@ -217,15 +282,21 @@ Checking if io_uring is accessible to the configured DB user: yes
 
 ---
 
-## 🛠️️ 내부 검증용 메모 (Editorial Verification Note)
+## 12.4 장 요약 및 전체 과정 마무리 (Chapter Summary & Conclusion)
 
-* **로그 디렉토리 경로 검증**: `installActions.log`, `silentInstall.log`는 중앙 인벤토리(`oraInventory/logs/`) 아래 생성되며, DBCA 로그는 `$ORACLE_BASE/cfgtoollogs/dbca/`에 위치함을 공식 설치 문서 표준에 맞춰 검증함 (출처: clusterware-administration-and-deployment-guide.pdf, 2019; real-application-clusters-administration-and-deployment-guide.pdf, 2026).
-* **에러 메커니즘 검증**: `ORA-00119`/`ORA-00132`는 `LOCAL_LISTENER` 파라미터의 tnsnames 식별자 미해결 시 LREG/PMON에 의해 인스턴스 개시가 거부되는 에러임을 명시함 (출처: database-net-services-administrators-guide.pdf, 2019). `ORA-04031` 및 Linux `MEMORY_TARGET`과 `USE_LARGE_PAGES` 충돌 상충 관계를 공식 매뉴얼 규격으로 확인 반영함 (출처: database-reference.pdf, 2019).
+이번 마지막 장에서는 Headless CUI 환경에서 발생할 수 있는 각종 설치 및 운영 이슈를 스스로 진단하고 해결하기 위한 실전 트러블슈팅 가이드를 정리했습니다.
+
+1. **통합 로그 분석 체계**: `oraInventory/logs`, `$ORACLE_BASE/cfgtoollogs`, 그리고 ADR(`alert_orcl.log` 및 `adrci`)로 이어지는 3대 로그 저장소의 역할과 실시간 필터링 기법을 익혔습니다.
+2. **사전 검증의 정석 대응**: `-ignorePrereqFailure`의 무분별한 남용을 피하고, `-executePrereqs`와 `CV_ASSUME_DISTID=OL8` 및 `./relink all`을 통해 바이너리 무결성을 지키는 절차를 확인했습니다.
+3. **핵심 에러 3종 해결**: 네트워크 주소 해석 오류(`ORA-00119`/`ORA-00132`), 공유 메모리 및 HugePages 부족 오류(`ORA-04031`/`ORA-27137`), 그리고 UEK R7 커널의 `io_uring` 그룹 권한 불일치 이슈의 원리와 해결책을 마스터했습니다.
+
+이로써 **Oracle Linux 9(UEK R7) 기반 Oracle Database 19c Standard Edition 2(SE2)의 아키텍처 설계, OS 설치, 커널 및 HugePages 튜닝, 무대화형(Silent) 엔진 설치 및 패치 적용, 리스너 및 멀티테넌트 CDB/PDB 구축, `systemd` 서비스 자동화, RMAN 백업 스크립트 구현, 그리고 실전 트러블슈팅**에 이르는 전 과정을 모두 완주했습니다. 본서의 표준 절차와 스크립트가 독자 여러분의 엔터프라이즈 데이터베이스 현장에서 흔들림 없는 기술적 나침반이 되기를 바랍니다.
 
 ---
 
-### 💡 기획 편집자 총평
+# References
 
-본 도서 **"Oracle Linux 9 & Oracle Database 19c SE2 Silent Mode 구축·운영 가이드"**의 전체 12개 챕터 집필이 모두 완수되었습니다.
-
-하드웨어 준비부터 Oracle Linux 9 Minimal (CUI) 설치, `oracle-database-preinstall-19c` RPM 사전 환경 최적화, Static HugePages, `io_uring` 기반 ASMLIB, `runInstaller -silent` 엔진 설치, `netca -silent` 리스너 구성, `dbca -silent` 데이터베이스 생성(CDB/PDB), 메모리/RU 패치 관리, systemd 자동 시작, RMAN 백업 스크립트, 그리고 이번 12장의 Silent 트러블슈팅까지 **100% CUI/Silent Mode 중심의 완벽한 실무 바이블**로 완성되었습니다.
+[1] Oracle. 2024. *Oracle Database Installation Guide 19c for Linux (E96297): Troubleshooting the Oracle Database Installation*. Oracle America, Inc. Retrieved April 6, 2026 from https://docs.oracle.com/en/database/oracle/oracle-database/19/ladbi/troubleshooting-the-oracle-database-installation.html
+[2] Oracle. 2024. *Oracle Database Error Messages 19c (E96227): ORA-00119, ORA-00132, ORA-04031, and ORA-27137*. Oracle America, Inc. Retrieved April 6, 2026 from https://docs.oracle.com/en/database/oracle/oracle-database/19/errmg/
+[3] Oracle. 2024. *Oracle Database Administrator's Guide 19c (E96348): Chapter 9 Managing Diagnostic Data (ADR and ADRCI)*. Oracle America, Inc. Retrieved April 6, 2026 from https://docs.oracle.com/en/database/oracle/oracle-database/19/admin/managing-diagnostic-data.html
+[4] Oracle. 2024. *Oracle Linux 9: Installing and Configuring Oracle ASMLib v3 (io_uring and eBPF I/O Filter)*. Oracle America, Inc. Retrieved April 6, 2026 from https://docs.oracle.com/en/operating-systems/oracle-linux/asmlib/
